@@ -5865,10 +5865,17 @@ def _run_one_job_body(
             reset_secret_scope,
             set_secret_scope,
         )
-
-        _scope_token = set_secret_scope(
-            build_profile_secret_scope(_get_hermes_home())
+        from hermes_constants import (
+            reset_hermes_home_override,
+            set_hermes_home_override,
         )
+        from hermes_cli.env_loader import hydrate_profile_secret_sources
+
+        _job_home = _get_hermes_home()
+        _home_token = None
+        _scope_token = None
+        _deferred_agents: list = []
+
         # Defer the cron agent's async-resource teardown until AFTER delivery.
         # run_job normally closes the agent (and reaps stale async clients) in
         # its finally block; doing that before _deliver_result runs means the
@@ -5876,32 +5883,42 @@ def _run_one_job_body(
         # list makes run_job hand the agent back instead, and we tear it down
         # below once delivery is done. Defense-in-depth alongside the
         # interpreter-shutdown guard in _deliver_result.
-        _deferred_agents: list = []
         try:
-            if fire_claim_lost is None:
-                success, output, final_response, error = run_job(
-                    job,
-                    defer_agent_teardown=_deferred_agents,
-                    extra_prompt=extra_prompt,
-                )
-            else:
-                success, output, final_response, error = run_job(
-                    job,
-                    defer_agent_teardown=_deferred_agents,
-                    extra_prompt=extra_prompt,
-                    cancel_event=fire_claim_lost,
-                )
-        except BaseException:
-            # run_job's finally still hands back the agent when it raises; tear
-            # it down here so a failed run never leaks its async resources
-            # (#10200), then re-raise into the outer handler. BaseException
-            # (not just Exception) so a KeyboardInterrupt/SystemExit mid-run
-            # still triggers teardown before propagating.
-            for _deferred_agent in _deferred_agents:
-                _teardown_cron_agent(_deferred_agent, job["id"])
-            raise
+            _home_token = set_hermes_home_override(str(_job_home))
+            hydrate_profile_secret_sources(_job_home)
+            _scope_token = set_secret_scope(
+                build_profile_secret_scope(_job_home)
+            )
+
+            try:
+                if fire_claim_lost is None:
+                    success, output, final_response, error = run_job(
+                        job,
+                        defer_agent_teardown=_deferred_agents,
+                        extra_prompt=extra_prompt,
+                    )
+                else:
+                    success, output, final_response, error = run_job(
+                        job,
+                        defer_agent_teardown=_deferred_agents,
+                        extra_prompt=extra_prompt,
+                        cancel_event=fire_claim_lost,
+                    )
+            except BaseException:
+                # run_job's finally still hands back the agent when it raises; tear
+                # it down here so a failed run never leaks its async resources
+                # (#10200), then re-raise into the outer handler. BaseException
+                # (not just Exception) so a KeyboardInterrupt/SystemExit mid-run
+                # still triggers teardown before propagating.
+                for _deferred_agent in _deferred_agents:
+                    _teardown_cron_agent(_deferred_agent, job["id"])
+                raise
+            finally:
+                if _scope_token is not None:
+                    reset_secret_scope(_scope_token)
         finally:
-            reset_secret_scope(_scope_token)
+            if _home_token is not None:
+                reset_hermes_home_override(_home_token)
 
         if _fire_claim_ownership_lost():
             for _deferred_agent in _deferred_agents:

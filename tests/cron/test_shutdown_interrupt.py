@@ -629,3 +629,56 @@ class TestRunOneJobHonoursInterruptedFlag:
 
         assert result is False
         mock_mark.assert_not_called()
+
+
+class TestRunOneJobProfileScopeIsolation:
+    def test_run_one_job_sets_and_resets_profile_runtime_context(self):
+        import cron.scheduler as sched
+
+        job = {"id": "job-profile-scope", "name": "profile job", "prompt": "ping"}
+
+        with patch("cron.scheduler.claim_dispatch", return_value=True), \
+             patch("agent.secret_scope.set_secret_scope", return_value="scope-token") as m_set_scope, \
+             patch("agent.secret_scope.build_profile_secret_scope", return_value={"TOKEN": "value"}) as m_build_scope, \
+             patch("agent.secret_scope.reset_secret_scope") as m_reset_scope, \
+             patch("hermes_constants.set_hermes_home_override", return_value="home-token") as m_set_home, \
+             patch("hermes_constants.reset_hermes_home_override") as m_reset_home, \
+             patch("hermes_cli.env_loader.hydrate_profile_secret_sources") as m_hydrate, \
+             patch("cron.scheduler.run_job", return_value=(True, "full output", "final response", None)), \
+             patch("cron.scheduler.save_job_output", return_value="/tmp/out.md"), \
+             patch("cron.scheduler._is_cron_silence_response", return_value=False), \
+             patch("cron.scheduler._deliver_result", return_value=None), \
+             patch("cron.scheduler.heartbeat_fire_claim", return_value=True), \
+             patch("cron.scheduler.mark_job_run"):
+            sched.run_one_job(job)
+
+        home = sched._get_hermes_home()
+        m_hydrate.assert_called_once_with(home)
+        m_set_home.assert_called_once_with(str(home))
+        m_set_scope.assert_called_once_with({"TOKEN": "value"})
+        m_build_scope.assert_called_once_with(home)
+        m_reset_home.assert_called_once_with("home-token")
+        m_reset_scope.assert_called_once_with("scope-token")
+
+    def test_run_one_job_resets_home_override_if_setup_fails(self):
+        import cron.scheduler as sched
+
+        job = {"id": "job-profile-scope-setup-fail", "name": "setup fail", "prompt": "ping"}
+
+        with patch("cron.scheduler.claim_dispatch", return_value=True), \
+             patch("hermes_constants.set_hermes_home_override", return_value="home-token") as m_set_home, \
+             patch("hermes_constants.reset_hermes_home_override") as m_reset_home, \
+             patch("hermes_cli.env_loader.hydrate_profile_secret_sources", side_effect=RuntimeError("hydrate failed")) as m_hydrate, \
+             patch("agent.secret_scope.set_secret_scope") as m_set_scope, \
+             patch("agent.secret_scope.reset_secret_scope") as m_reset_scope, \
+             patch("cron.scheduler.run_job") as m_run_job:
+            result = sched.run_one_job(job)
+
+        assert result is False
+
+        m_set_home.assert_called_once()
+        m_hydrate.assert_called_once_with(sched._get_hermes_home())
+        m_reset_home.assert_called_once_with("home-token")
+        m_set_scope.assert_not_called()
+        m_reset_scope.assert_not_called()
+        m_run_job.assert_not_called()
